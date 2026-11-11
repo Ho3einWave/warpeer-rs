@@ -149,11 +149,11 @@ hex. `--masque-endpoint` sets the MASQUE edge explicitly (WireGuard already
 accepts IPv6 via `-e`):
 
 ```sh
-# NAT64 prefix 2602:fc59:b0:64::, WARP 162.159.198.2 -> a29f:c602
-warpeer --masque --masque-endpoint '[2602:fc59:b0:64::a29f:c602]:443'
+# US (Chicago) NAT64 prefix, WARP 162.159.198.2 -> a29f:c602
+warpeer --masque --masque-endpoint '[2602:fc59:11:64::a29f:c602]:443'
 
 # WireGuard equivalent (WARP 162.159.199.2 -> a29f:c702, port 2408)
-warpeer -e '[2602:fc59:b0:64::a29f:c702]:2408'
+warpeer -e '[2602:fc59:11:64::a29f:c702]:2408'
 ```
 
 This is the "Soul Transfer" technique (not a nested tunnel). For a single tunnel
@@ -257,6 +257,19 @@ MASQUE over HTTP/2 measured ~4.6–5.5 MB/s with `--mtu 1400` on a network where
 UDP/443 was filtered, while WireGuard with the 2 MiB buffer reached ~12–13 MB/s
 on the same 120 Mbps line. HTTP/3 (where UDP works) is the faster MASQUE path;
 the HTTP/2 fallback is for networks that cannot use it.
+
+Indicative throughput on the test line (varies with time of day and endpoint):
+
+| Path | Throughput |
+|---|---|
+| WireGuard, 2 MiB TCP buffer | 11.6–13.7 MB/s |
+| MASQUE over HTTP/2 | 4–6 MB/s |
+| MASQUE-in-MASQUE (outer + inner H2) | 1–4 MB/s |
+| MASQUE-in-MASQUE + NAT64 | 0.2–1.2 MB/s |
+
+HTTP/3 could not be tested on that network (UDP/443 filtered). The nested and
+NAT64 paths are dominated by the extra encapsulation and public-gateway capacity,
+not CPU.
 
 ## Architecture
 
