@@ -1,0 +1,56 @@
+[package]
+name = "warpeer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Userspace Cloudflare WARP client (warp + warp-in-warp) with AmneziaWG-style junk-packet obfuscation"
+
+[[bin]]
+name = "warpeer"
+path = "src/main.rs"
+
+[dependencies]
+# async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+
+# wireguard protocol (noise) — Cloudflare's own Rust implementation
+boringtun = "0.6"
+
+# userspace TCP/IP stack
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "proto-dns", "socket-tcp", "socket-udp", "socket-dns"] }
+
+# NOTE: x25519 key types come from `boringtun::x25519` (a re-export of x25519-dalek
+# pinned to 2.0.0-rc.3 by boringtun 0.6). We must NOT depend on x25519-dalek directly
+# or the versions conflict.
+
+# HTTP client for the WARP registration API (standard TLS via rustls for now)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# encoding
+base64 = "0.22"
+hex = "0.4"
+
+# RFC3339 timestamp for the registration `tos` field
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# randomness
+rand = "0.8"
+
+# cli
+clap = { version = "4", features = ["derive"] }
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# errors
+thiserror = "2"
+anyhow = "1"
+
+# cache dir resolution
+directories = "5"
+tun = { version = "0.8.11", features = ["async"] }

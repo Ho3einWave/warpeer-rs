@@ -1,0 +1,9 @@
+/target
+/target-linux
+*.log
+/testcache
+
+# WARP identity (contains the device private key)
+/warpeer_cache/
+wgcf-identity.json
+wgcf-identity.json.bak
