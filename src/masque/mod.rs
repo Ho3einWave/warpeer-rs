@@ -23,7 +23,7 @@ use usque_config::Config;
 use usque_masque::{connect_tunnel, ConnectOptions, PacketSession};
 
 use crate::app::{self, Options};
-use crate::netstack::{EngineIo, NetStack};
+use crate::netstack::{EngineIo, NetStack, TunnelTcp};
 use crate::proxy;
 
 /// The MASQUE edge listens on 443 (QUIC/HTTP3).
@@ -38,6 +38,11 @@ const H2_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MASQUE_CONFIG_FILE: &str = "masque.json";
+const MASQUE_GOOL_OUTER_FILE: &str = "masque-gool-outer.json";
+const MASQUE_GOOL_INNER_FILE: &str = "masque-gool-inner.json";
+/// MTU used for the outer tunnel's netstack (which only carries the inner
+/// MASQUE TCP stream).
+const MASQUE_MTU: usize = 1400;
 
 /// Run the whole MASQUE path: config (register on first use), tunnel, netstack,
 /// connectivity check and the local proxy.
@@ -46,9 +51,23 @@ pub async fn run(opts: &Options) -> Result<()> {
     // aws-lc-rs provider, and installing it after another provider is an error.
     usque_crypto::init();
 
-    let config = load_or_register(opts).await?;
+    if opts.masque_gool {
+        run_gool(opts).await
+    } else {
+        run_single(opts).await
+    }
+}
+
+async fn run_single(opts: &Options) -> Result<()> {
+    let config = config_for(
+        opts.masque_config.as_deref(),
+        &opts.cache_dir.join(MASQUE_CONFIG_FILE),
+        &opts.license,
+        "MASQUE",
+    )
+    .await?;
     let addresses = interface_addresses(&config)?;
-    let client = MasqueClient::new(&config, opts)?;
+    let client = MasqueClient::new(&config, opts, true)?;
 
     info!(
         endpoint_v4 = %client.endpoint_h3,
@@ -74,21 +93,92 @@ pub async fn run(opts: &Options) -> Result<()> {
     proxy::serve(opts.bind, netstack).await
 }
 
-/// Load the existing MASQUE config, or register + enroll a new device and save it.
-async fn load_or_register(opts: &Options) -> Result<Config> {
-    if let Some(path) = &opts.masque_config {
+/// MASQUE-in-MASQUE: the inner MASQUE session runs as TCP through the outer
+/// MASQUE tunnel's netstack. The outer session can be HTTP/3 or HTTP/2; the
+/// inner session is HTTP/2 (works even when UDP/443 is filtered).
+async fn run_gool(opts: &Options) -> Result<()> {
+    let outer_config = config_for(
+        opts.masque_config.as_deref(),
+        &opts.cache_dir.join(MASQUE_GOOL_OUTER_FILE),
+        &opts.license,
+        "outer",
+    )
+    .await?;
+    let inner_config = config_for(
+        opts.masque_inner_config.as_deref(),
+        &opts.cache_dir.join(MASQUE_GOOL_INNER_FILE),
+        "",
+        "inner",
+    )
+    .await?;
+    if outer_config.id == inner_config.id {
+        return Err(anyhow!(
+            "outer and inner MASQUE configs must be different WARP devices"
+        ));
+    }
+
+    let outer_addresses = interface_addresses(&outer_config)?;
+    let inner_addresses = interface_addresses(&inner_config)?;
+    let outer = MasqueClient::new(&outer_config, opts, true)?;
+    let inner = MasqueClient::new(&inner_config, opts, false)?;
+
+    info!(
+        outer_h3 = %outer.endpoint_h3,
+        outer_h2 = %outer.endpoint_h2,
+        inner_h2 = %inner.endpoint_h2,
+        "connecting outer MASQUE tunnel"
+    );
+    let outer_session = outer
+        .connect()
+        .await
+        .context("outer MASQUE connection failed")?;
+
+    let (outer_netstack, outer_io) =
+        NetStack::new(outer_addresses, vec![opts.dns], MASQUE_MTU, opts.tcp_buf);
+    tokio::spawn(engine_loop(outer, outer_session, outer_io));
+
+    info!("connecting inner MASQUE tunnel through the outer tunnel");
+    let inner_session = connect_inner_h2(&inner, &outer_netstack)
+        .await
+        .context("inner MASQUE connection failed")?;
+
+    let (inner_netstack, inner_io) =
+        NetStack::new(inner_addresses, vec![opts.dns], opts.mtu, opts.tcp_buf);
+    tokio::spawn(inner_engine_loop(
+        inner,
+        outer_netstack,
+        inner_session,
+        inner_io,
+    ));
+
+    if !app::connectivity_ok(&inner_netstack).await {
+        return Err(anyhow!(
+            "MASQUE-in-MASQUE data path did not pass the connectivity test"
+        ));
+    }
+
+    info!(bind = %opts.bind, "MASQUE-in-MASQUE established");
+    proxy::serve(opts.bind, inner_netstack).await
+}
+
+/// Load the given config if it exists, otherwise use the default path and
+/// register there. Explicit paths (CLI flags) must already exist.
+async fn config_for(
+    explicit: Option<&Path>,
+    default: &Path,
+    license: &str,
+    label: &str,
+) -> Result<Config> {
+    if let Some(path) = explicit {
         return Config::load(path)
-            .with_context(|| format!("loading MASQUE config {}", path.display()));
+            .with_context(|| format!("loading {label} MASQUE config {}", path.display()));
     }
-
-    let path = opts.cache_dir.join(MASQUE_CONFIG_FILE);
-    if path.exists() {
-        info!(path = %path.display(), "loading existing MASQUE config");
-        return Config::load(&path)
-            .with_context(|| format!("loading MASQUE config {}", path.display()));
+    if default.exists() {
+        info!(path = %default.display(), label, "loading existing MASQUE config");
+        return Config::load(default)
+            .with_context(|| format!("loading {label} MASQUE config {}", default.display()));
     }
-
-    register_and_save(&path, &opts.license).await
+    register_and_save(default, license).await
 }
 
 /// Register a WARP device, switch it to MASQUE mode by enrolling an ECDSA key,
@@ -252,7 +342,7 @@ struct MasqueClient {
 }
 
 impl MasqueClient {
-    fn new(config: &Config, opts: &Options) -> Result<Self> {
+    fn new(config: &Config, opts: &Options, use_endpoint_override: bool) -> Result<Self> {
         let signing_key = usque_crypto::decode_private_key(&config.private_key)
             .context("parsing the MASQUE private key")?;
         let peer = usque_crypto::decode_endpoint_public_key(&config.endpoint_pub_key)
@@ -272,12 +362,19 @@ impl MasqueClient {
             .context("building the MASQUE TLS config")
         };
 
-        let endpoint_h3 = match opts.masque_endpoint {
+        // The CLI override applies to the outer/single tunnel, not to the inner
+        // device of a MASQUE-in-MASQUE chain.
+        let override_addr = if use_endpoint_override {
+            opts.masque_endpoint
+        } else {
+            None
+        };
+        let endpoint_h3 = match override_addr {
             Some(addr) => addr,
             None => select_endpoint(config, opts.use_v4, opts.use_v6, false)?,
         };
         // HTTP/2 can fall back to the HTTP/3 edge if the config lacks an h2 one.
-        let endpoint_h2 = match opts.masque_endpoint {
+        let endpoint_h2 = match override_addr {
             Some(addr) => addr,
             None => select_endpoint(config, opts.use_v4, opts.use_v6, true).unwrap_or(endpoint_h3),
         };
@@ -392,6 +489,114 @@ async fn engine_loop(client: MasqueClient, mut session: Box<dyn PacketSession>, 
             }
         }
     }
+}
+
+/// Reconnect the inner MASQUE session on failure, keeping the inner netstack
+/// (and its TCP connections) alive. The inner transport is HTTP/2 over a TCP
+/// connection that runs through the outer tunnel's netstack.
+async fn inner_engine_loop(
+    client: MasqueClient,
+    outer: NetStack,
+    mut session: Box<dyn PacketSession>,
+    io: EngineIo,
+) {
+    let EngineIo {
+        inbound_tx,
+        mut outbound_rx,
+    } = io;
+    let mut backoff = INITIAL_BACKOFF;
+
+    loop {
+        match pump(&mut *session, &inbound_tx, &mut outbound_rx).await {
+            PumpEnd::NetstackGone => {
+                debug!("inner netstack dropped; stopping the MASQUE-in-MASQUE engine");
+                return;
+            }
+            PumpEnd::Closed(reason) => warn!("inner MASQUE session ended: {reason}"),
+        }
+
+        let _ = session.close().await;
+
+        loop {
+            while outbound_rx.try_recv().is_ok() {}
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+
+            match connect_inner_h2(&client, &outer).await {
+                Ok(new_session) => {
+                    info!("inner MASQUE reconnected");
+                    session = new_session;
+                    backoff = INITIAL_BACKOFF;
+                    break;
+                }
+                Err(e) => warn!("inner MASQUE reconnect failed: {e}"),
+            }
+        }
+    }
+}
+
+/// Open the inner MASQUE HTTP/2 session over a TCP connection carried by the
+/// outer tunnel's netstack. No UDP or QUIC is used on the inner hop, so this
+/// works on networks where UDP/443 is filtered.
+async fn connect_inner_h2(
+    client: &MasqueClient,
+    outer: &NetStack,
+) -> Result<Box<dyn PacketSession>> {
+    let endpoint = client.endpoint_h2;
+    let tcp = outer
+        .connect(endpoint)
+        .await
+        .with_context(|| format!("outer netstack TCP connect to {endpoint}"))?;
+
+    // The H2/TLS stack needs an AsyncRead + AsyncWrite stream. The duplex is
+    // bridged to the netstack connection; the outer TCP stack handles all
+    // segmentation and retransmission.
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(bridge_tcp(tcp, server_io));
+
+    let session = tokio::time::timeout(
+        H2_CONNECT_TIMEOUT,
+        usque_masque::connect_h2_on(&client.options(true), client_io),
+    )
+    .await
+    .map_err(|_| anyhow!("inner MASQUE HTTP/2 handshake timed out"))??;
+
+    info!(endpoint = %endpoint, "inner MASQUE transport: HTTP/2 through the outer tunnel");
+    Ok(Box::new(session))
+}
+
+/// Pump bytes between a netstack TCP connection and a local duplex stream.
+async fn bridge_tcp(mut tcp: TunnelTcp, stream: tokio::io::DuplexStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut read, mut write) = tokio::io::split(stream);
+    let writer = tcp.writer();
+
+    // duplex -> outer TCP
+    let up = tokio::spawn(async move {
+        let mut buf = [0u8; 32 * 1024];
+        loop {
+            match read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if writer.write(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        writer.shutdown();
+    });
+
+    // outer TCP -> duplex
+    while let Some(data) = tcp.recv().await {
+        if write.write_all(&data).await.is_err() {
+            break;
+        }
+    }
+    let _ = write.shutdown().await;
+    up.abort();
 }
 
 enum PumpEnd {

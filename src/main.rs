@@ -72,6 +72,14 @@ struct Cli {
     #[arg(long, value_name = "IP[:PORT]")]
     masque_endpoint: Option<String>,
 
+    /// MASQUE-in-MASQUE: carry an inner MASQUE tunnel through an outer MASQUE tunnel
+    #[arg(long, visible_alias = "masque-in-masque")]
+    masque_gool: bool,
+
+    /// Inner MASQUE config for --masque-gool (the outer uses --masque-config)
+    #[arg(long, value_name = "FILE")]
+    masque_inner_config: Option<PathBuf>,
+
     /// Standard WireGuard config to use as the outer tunnel; implies --gool
     #[arg(long, value_name = "FILE", conflicts_with = "inner_config")]
     outer_config: Option<PathBuf>,
@@ -152,8 +160,12 @@ async fn real_main(cli: Cli) -> Result<()> {
     }
     let has_custom_config = cli.outer_config.is_some() || cli.inner_config.is_some();
     let gool = cli.gool || has_custom_config;
-    let masque =
-        cli.masque || cli.masque_config.is_some() || cli.masque_h2 || cli.masque_endpoint.is_some();
+    let masque_gool = cli.masque_gool || cli.masque_inner_config.is_some();
+    let masque = cli.masque
+        || cli.masque_config.is_some()
+        || cli.masque_h2
+        || cli.masque_endpoint.is_some()
+        || masque_gool;
 
     // MASQUE's CONNECT-IP edge carries 1400-byte packets; WireGuard keeps the
     // warp-plus-compatible 1330 default.
@@ -247,7 +259,15 @@ async fn real_main(cli: Cli) -> Result<()> {
         None
     };
 
-    info!(endpoint = ?endpoint, %bind, gool, masque, scan = cli.scan, "starting warpeer");
+    info!(
+        endpoint = ?endpoint,
+        %bind,
+        gool,
+        masque,
+        masque_gool,
+        scan = cli.scan,
+        "starting warpeer"
+    );
 
     let opts = app::Options {
         bind,
@@ -261,7 +281,9 @@ async fn real_main(cli: Cli) -> Result<()> {
         inner_config: cli.inner_config,
         tun: cli.tun,
         masque,
+        masque_gool,
         masque_config: cli.masque_config,
+        masque_inner_config: cli.masque_inner_config,
         masque_h2: cli.masque_h2,
         masque_endpoint,
         use_v4,
@@ -361,5 +383,20 @@ mod tests {
             "[2602:fc59:b0:64::a29f:c602]:443".parse().unwrap()
         );
         assert!(parse_endpoint_override("consumer-masque.cloudflareclient.com").is_err());
+    }
+
+    #[test]
+    fn parses_masque_gool_flags() {
+        use clap::Parser;
+
+        let cli = super::Cli::try_parse_from([
+            "warpeer",
+            "--masque-gool",
+            "--masque-inner-config",
+            "/tmp/inner.json",
+        ])
+        .unwrap();
+        assert!(cli.masque_gool);
+        assert!(cli.masque_inner_config.is_some());
     }
 }

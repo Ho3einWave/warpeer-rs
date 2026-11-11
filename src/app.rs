@@ -48,8 +48,12 @@ pub struct Options {
     pub tun: bool,
     /// MASQUE mode (CONNECT-IP over HTTP/3) instead of WireGuard.
     pub masque: bool,
+    /// MASQUE-in-MASQUE: inner MASQUE through an outer MASQUE tunnel.
+    pub masque_gool: bool,
     /// Existing usque-compatible MASQUE config file.
     pub masque_config: Option<PathBuf>,
+    /// Inner MASQUE config for --masque-gool.
+    pub masque_inner_config: Option<PathBuf>,
     /// Force HTTP/2 for MASQUE (otherwise HTTP/3 then fallback).
     pub masque_h2: bool,
     /// Explicit MASQUE edge address override (e.g. a NAT64 IPv6 endpoint).

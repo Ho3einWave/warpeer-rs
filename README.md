@@ -14,6 +14,7 @@ Features:
 - **Normal WARP** — a single WireGuard tunnel to a Cloudflare WARP endpoint.
 - **MASQUE** — Cloudflare's newer CONNECT-IP over HTTP/3 transport (with
   automatic HTTP/2 fallback when UDP/443 is filtered).
+- **MASQUE-in-MASQUE** — an inner MASQUE tunnel carried through an outer MASQUE tunnel.
 - **warp-in-warp (gool)** — a second WARP tunnel nested inside the first.
 - **Custom outer WireGuard** — run WARP inside a standard WireGuard tunnel.
 - **Custom inner WireGuard** — run a standard WireGuard tunnel inside WARP.
@@ -160,7 +161,33 @@ connectivity, and public NAT64 gateways have usage limits and extra latency;
 choose a prefix appropriate for the location you want and expect variable
 stability.
 
-MASQUE currently cannot be combined with `--gool`, `--tun`, `--scan` or `-e`.
+#### MASQUE-in-MASQUE
+
+`--masque-gool` registers two separate WARP devices and carries the inner MASQUE
+session as TCP through the outer MASQUE tunnel's netstack. Both layers are
+MASQUE. The outer can be HTTP/3 or HTTP/2; the inner is HTTP/2, so the chain
+works even when UDP/443 is filtered. The proxy is served on the inner tunnel.
+
+```sh
+# outer HTTP/2 (skip the HTTP/3 probe) + inner HTTP/2
+warpeer --masque-gool --masque-h2
+```
+
+The two devices are auto-registered and stored as `masque-gool-outer.json` and
+`masque-gool-inner.json` in the cache directory. Existing devices can be
+supplied with `--masque-config` (outer) and `--masque-inner-config` (inner);
+they must be different WARP devices.
+
+Measured on the test line: 60/60 requests over two minutes, roughly 2.8–4.1 MB/s
+(vs ~4 MB/s for a single MASQUE H2 tunnel and ~12 MB/s for WireGuard). The double
+encapsulation costs latency and throughput; it is a chaining/location tool, not a
+speed upgrade. In that test the WARP exit location stayed the same (`loc=IR`,
+`colo=FRA`) for WireGuard, single MASQUE and MASQUE-in-MASQUE — nesting alone
+does not change the exit; use the NAT64 `--masque-endpoint` above if that is the
+goal.
+
+MASQUE (including `--masque-gool`) currently cannot be combined with `--gool`,
+`--tun`, `--scan` or `-e`.
 HTTP/2 fallback is reliable but slower than HTTP/3 (and slower than WireGuard
 on a healthy path).
 
@@ -279,7 +306,9 @@ SOCKS client → [inner WG + netstack] → localhost UDP shim → [outer WG] →
 | `--masque` | use MASQUE (CONNECT-IP over HTTP/3) instead of WireGuard |
 | `--masque-h2` | force HTTP/2 for MASQUE (otherwise HTTP/3 then fallback) |
 | `--masque-endpoint <IP[:PORT]>` | override the MASQUE edge (NAT64/IPv6 address; port defaults to 443) |
-| `--masque-config <FILE>` | reuse a usque-compatible MASQUE config; implies `--masque` |
+| `--masque-gool` | MASQUE-in-MASQUE: carry an inner MASQUE tunnel through an outer one (alias `--masque-in-masque`) |
+| `--masque-inner-config <FILE>` | inner MASQUE config for `--masque-gool`; implies it |
+| `--masque-config <FILE>` | reuse a usque-compatible MASQUE config; outer config in `--masque-gool` |
 | `--outer-config <FILE>` | custom standard WireGuard outer; WARP remains inner |
 | `--inner-config <FILE>` | custom standard WireGuard inner; WARP remains outer |
 | `--tun` | full-system TUN mode (Windows; Administrator + `wintun.dll`) |
