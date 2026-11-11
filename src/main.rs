@@ -65,8 +65,12 @@ struct Cli {
     masque_config: Option<PathBuf>,
 
     /// Force HTTP/2 for MASQUE (default: HTTP/3, falling back to HTTP/2)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "masque_h3")]
     masque_h2: bool,
+
+    /// Force HTTP/3 for MASQUE (no HTTP/2 fallback)
+    #[arg(long)]
+    masque_h3: bool,
 
     /// Override the MASQUE edge address (ip[:port], IPv6 in brackets); useful for NAT64 endpoints
     #[arg(long, value_name = "IP[:PORT]")]
@@ -169,6 +173,7 @@ async fn real_main(cli: Cli) -> Result<()> {
     let masque = cli.masque
         || cli.masque_config.is_some()
         || cli.masque_h2
+        || cli.masque_h3
         || cli.masque_endpoint.is_some()
         || masque_gool;
 
@@ -295,6 +300,7 @@ async fn real_main(cli: Cli) -> Result<()> {
         masque_config: cli.masque_config,
         masque_inner_config: cli.masque_inner_config,
         masque_h2: cli.masque_h2,
+        masque_h3: cli.masque_h3,
         masque_endpoint,
         masque_inner_endpoint,
         use_v4,

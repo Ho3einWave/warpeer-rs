@@ -56,6 +56,8 @@ pub struct Options {
     pub masque_inner_config: Option<PathBuf>,
     /// Force HTTP/2 for MASQUE (otherwise HTTP/3 then fallback).
     pub masque_h2: bool,
+    /// Force HTTP/3 for MASQUE (no HTTP/2 fallback).
+    pub masque_h3: bool,
     /// Explicit MASQUE edge address override (e.g. a NAT64 IPv6 endpoint).
     pub masque_endpoint: Option<SocketAddr>,
     /// Inner MASQUE edge override for --masque-gool (e.g. NAT64).

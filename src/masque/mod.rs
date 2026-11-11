@@ -10,7 +10,7 @@
 //! a patched `h3` lives under `vendor/h3` (see `[patch.crates-io]`).
 
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,13 +33,17 @@ const CONNECT_PORT: u16 = 443;
 const KEEPALIVE: Duration = Duration::from_secs(10);
 /// QUIC handshakes complete in well under a second on a working path; a short
 /// timeout lets us fall back to HTTP/2 when UDP/443 is filtered.
-const H3_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const H3_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const H2_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MASQUE_CONFIG_FILE: &str = "masque.json";
 const MASQUE_GOOL_OUTER_FILE: &str = "masque-gool-outer.json";
 const MASQUE_GOOL_INNER_FILE: &str = "masque-gool-inner.json";
+const MASQUE_TRANSPORT_MARKER: &str = "masque-transport";
+const MASQUE_GOOL_TRANSPORT_MARKER: &str = "masque-gool-outer-transport";
+/// How long a cached transport choice is trusted before re-probing HTTP/3.
+const TRANSPORT_MARKER_MAX_AGE: Duration = Duration::from_secs(6 * 3600);
 /// MTU used for the outer tunnel's netstack (which only carries the inner
 /// MASQUE TCP stream).
 const MASQUE_MTU: usize = 1400;
@@ -67,7 +71,12 @@ async fn run_single(opts: &Options) -> Result<()> {
     )
     .await?;
     let addresses = interface_addresses(&config)?;
-    let client = MasqueClient::new(&config, opts, opts.masque_endpoint)?;
+    let client = MasqueClient::new(
+        &config,
+        opts,
+        opts.masque_endpoint,
+        Some(opts.cache_dir.join(MASQUE_TRANSPORT_MARKER)),
+    )?;
 
     info!(
         endpoint_v4 = %client.endpoint_h3,
@@ -119,8 +128,13 @@ async fn run_gool(opts: &Options) -> Result<()> {
 
     let outer_addresses = interface_addresses(&outer_config)?;
     let inner_addresses = interface_addresses(&inner_config)?;
-    let outer = MasqueClient::new(&outer_config, opts, opts.masque_endpoint)?;
-    let inner = MasqueClient::new(&inner_config, opts, opts.masque_inner_endpoint)?;
+    let outer = MasqueClient::new(
+        &outer_config,
+        opts,
+        opts.masque_endpoint,
+        Some(opts.cache_dir.join(MASQUE_GOOL_TRANSPORT_MARKER)),
+    )?;
+    let inner = MasqueClient::new(&inner_config, opts, opts.masque_inner_endpoint, None)?;
 
     info!(
         outer_h3 = %outer.endpoint_h3,
@@ -327,6 +341,25 @@ fn select_endpoint(
     }
 }
 
+/// True when the marker says HTTP/2 and is recent enough to trust.
+fn marker_prefers_h2(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if let Ok(modified) = meta.modified() {
+        if modified
+            .elapsed()
+            .map(|age| age > TRANSPORT_MARKER_MAX_AGE)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+    std::fs::read_to_string(path)
+        .map(|s| s.trim() == "h2")
+        .unwrap_or(false)
+}
+
 /// Everything needed to (re)establish the HTTP/3 or HTTP/2 session.
 struct MasqueClient {
     tls_h3: Arc<rustls::ClientConfig>,
@@ -339,10 +372,22 @@ struct MasqueClient {
     /// Set once HTTP/2 turns out to be the working transport (UDP/443 filtered);
     /// avoids paying the HTTP/3 timeout on every reconnect.
     prefer_h2: AtomicBool,
+    force_h2: bool,
+    force_h3: bool,
+    /// Cached transport choice (`h3`/`h2`) so restarts skip a blocked H3 probe.
+    transport_marker: Option<PathBuf>,
+    /// Only the first successful connect of a process refreshes the marker, so a
+    /// cached `h2` choice ages out and HTTP/3 is retried periodically.
+    record_on_connect: AtomicBool,
 }
 
 impl MasqueClient {
-    fn new(config: &Config, opts: &Options, endpoint_override: Option<SocketAddr>) -> Result<Self> {
+    fn new(
+        config: &Config,
+        opts: &Options,
+        endpoint_override: Option<SocketAddr>,
+        transport_marker: Option<PathBuf>,
+    ) -> Result<Self> {
         let signing_key = usque_crypto::decode_private_key(&config.private_key)
             .context("parsing the MASQUE private key")?;
         let peer = usque_crypto::decode_endpoint_public_key(&config.endpoint_pub_key)
@@ -361,6 +406,11 @@ impl MasqueClient {
             )
             .context("building the MASQUE TLS config")
         };
+
+        let marker_fresh_h2 = transport_marker
+            .as_deref()
+            .map(marker_prefers_h2)
+            .unwrap_or(false);
 
         let endpoint_h3 = match endpoint_override {
             Some(addr) => addr,
@@ -382,13 +432,20 @@ impl MasqueClient {
             endpoint_h3,
             endpoint_h2,
             sni,
-            prefer_h2: AtomicBool::new(opts.masque_h2),
+            prefer_h2: AtomicBool::new(opts.masque_h2 || marker_fresh_h2),
+            force_h2: opts.masque_h2,
+            force_h3: opts.masque_h3,
+            transport_marker,
+            record_on_connect: AtomicBool::new(!marker_fresh_h2 || opts.masque_h3),
         })
     }
 
     /// Connect over HTTP/3, falling back to HTTP/2 when UDP/443 is filtered.
     async fn connect(&self) -> Result<Box<dyn PacketSession>> {
-        if self.prefer_h2.load(Ordering::Relaxed) {
+        if self.force_h3 {
+            return self.connect_h3().await;
+        }
+        if self.force_h2 || self.prefer_h2.load(Ordering::Relaxed) {
             return self.connect_h2().await;
         }
 
@@ -408,6 +465,7 @@ impl MasqueClient {
     async fn connect_h3(&self) -> Result<Box<dyn PacketSession>> {
         let session = connect_tunnel(&self.options(false)).await?;
         self.prefer_h2.store(false, Ordering::Relaxed);
+        self.record_transport("h3");
         info!(endpoint = %self.endpoint_h3, "MASQUE transport: HTTP/3 (QUIC)");
         Ok(session)
     }
@@ -417,8 +475,21 @@ impl MasqueClient {
             .await
             .map_err(|_| anyhow!("HTTP/2 MASQUE connect timed out"))??;
         self.prefer_h2.store(true, Ordering::Relaxed);
+        self.record_transport("h2");
         info!(endpoint = %self.endpoint_h2, "MASQUE transport: HTTP/2 (TLS/TCP)");
         Ok(session)
+    }
+
+    fn record_transport(&self, transport: &str) {
+        if !self.record_on_connect.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        if let Some(path) = &self.transport_marker {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, transport);
+        }
     }
 
     fn options(&self, use_http2: bool) -> ConnectOptions {
@@ -700,6 +771,19 @@ mod tests {
                 .parse()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn transport_marker_prefers_h2() {
+        let path =
+            std::env::temp_dir().join(format!("warpeer-transport-marker-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(!marker_prefers_h2(&path));
+        std::fs::write(&path, "h2").unwrap();
+        assert!(marker_prefers_h2(&path));
+        std::fs::write(&path, "h3").unwrap();
+        assert!(!marker_prefers_h2(&path));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

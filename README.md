@@ -126,15 +126,23 @@ HTTP/2 (`cf-connect-ip` capsules over TLS/TCP); `--masque-h2` skips the HTTP/3
 attempt:
 
 ```sh
-# automatic: HTTP/3 first, HTTP/2 fallback
+# automatic: HTTP/3 first (5 s timeout), HTTP/2 fallback
 warpeer --masque
 
-# force HTTP/2 (skips the HTTP/3 timeout)
+# force HTTP/2 (skips the HTTP/3 probe)
 warpeer --masque --masque-h2
+
+# force HTTP/3 (no fallback; useful on networks where UDP/443 works)
+warpeer --masque --masque-h3
 
 # reuse a device registered by usque/usque-rs
 warpeer --masque --masque-config /path/to/config.json
 ```
+
+The first successful transport is cached in
+`<cache-dir>/masque-transport` for 6 hours, so restarts on a UDP-filtered
+network skip the HTTP/3 probe instead of paying the timeout every time.
+`--masque-h2` and `--masque-h3` override the automatic choice.
 
 `--masque-config` accepts the `config.json` format used by usque and usque-rs,
 so an existing device can be reused without registering a new one. MASQUE
@@ -271,6 +279,14 @@ HTTP/3 could not be tested on that network (UDP/443 filtered). The nested and
 NAT64 paths are dominated by the extra encapsulation and public-gateway capacity,
 not CPU.
 
+The HTTP/2 path itself is the ceiling: every address in `162.159.198.0/24`
+measured within ~1.3–1.8 MB/s on a 5 MB sample (`.1` failed, `.150` was
+marginally best), and four parallel user flows through one tunnel aggregated
+*below* a single flow (~2.5 MB/s vs ~2.7–3.0 MB/s) — the H2 stream, not the
+per-connection TCP stack, is the limit. CPU stayed at 6–11 % of one core. In
+short: WireGuard for speed, MASQUE for UDP-blocked networks or location change,
+and HTTP/3 (where UDP/443 works) for a faster MASQUE path.
+
 ## Architecture
 
 | Concern | Crate / module |
@@ -339,6 +355,7 @@ SOCKS client → [inner WG + netstack] → localhost UDP shim → [outer WG] →
 | `--gool` | warp-in-warp mode |
 | `--masque` | use MASQUE (CONNECT-IP over HTTP/3) instead of WireGuard |
 | `--masque-h2` | force HTTP/2 for MASQUE (otherwise HTTP/3 then fallback) |
+| `--masque-h3` | force HTTP/3 for MASQUE (no HTTP/2 fallback) |
 | `--masque-endpoint <IP[:PORT]>` | override the MASQUE edge (NAT64/IPv6 address; port defaults to 443) |
 | `--masque-gool` | MASQUE-in-MASQUE: carry an inner MASQUE tunnel through an outer one (alias `--masque-in-masque`) |
 | `--masque-inner-endpoint <IP[:PORT]>` | inner MASQUE edge override for `--masque-gool` (NAT64 for location change) |
