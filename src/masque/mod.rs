@@ -272,10 +272,15 @@ impl MasqueClient {
             .context("building the MASQUE TLS config")
         };
 
-        let endpoint_h3 = select_endpoint(config, opts.use_v4, opts.use_v6, false)?;
+        let endpoint_h3 = match opts.masque_endpoint {
+            Some(addr) => addr,
+            None => select_endpoint(config, opts.use_v4, opts.use_v6, false)?,
+        };
         // HTTP/2 can fall back to the HTTP/3 edge if the config lacks an h2 one.
-        let endpoint_h2 =
-            select_endpoint(config, opts.use_v4, opts.use_v6, true).unwrap_or(endpoint_h3);
+        let endpoint_h2 = match opts.masque_endpoint {
+            Some(addr) => addr,
+            None => select_endpoint(config, opts.use_v4, opts.use_v6, true).unwrap_or(endpoint_h3),
+        };
 
         Ok(Self {
             tls_h3: build_tls(b"h3")?,

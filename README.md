@@ -139,6 +139,27 @@ warpeer --masque --masque-config /path/to/config.json
 so an existing device can be reused without registering a new one. MASQUE
 defaults to a 1400-byte tunnel MTU; `--mtu` overrides it.
 
+#### Changing the WARP exit location (NAT64)
+
+Cloudflare normally assigns the nearest WARP exit. You can make the connection
+appear to come from another country by connecting through a NAT64 gateway: the
+endpoint is the NAT64 IPv6 prefix followed by the WARP IPv4 address encoded in
+hex. `--masque-endpoint` sets the MASQUE edge explicitly (WireGuard already
+accepts IPv6 via `-e`):
+
+```sh
+# NAT64 prefix 2602:fc59:b0:64::, WARP 162.159.198.2 -> a29f:c602
+warpeer --masque --masque-endpoint '[2602:fc59:b0:64::a29f:c602]:443'
+
+# WireGuard equivalent (WARP 162.159.199.2 -> a29f:c702, port 2408)
+warpeer -e '[2602:fc59:b0:64::a29f:c702]:2408'
+```
+
+This is the "Soul Transfer" technique (not a nested tunnel). It requires IPv6
+connectivity, and public NAT64 gateways have usage limits and extra latency;
+choose a prefix appropriate for the location you want and expect variable
+stability.
+
 MASQUE currently cannot be combined with `--gool`, `--tun`, `--scan` or `-e`.
 HTTP/2 fallback is reliable but slower than HTTP/3 (and slower than WireGuard
 on a healthy path).
@@ -257,6 +278,7 @@ SOCKS client → [inner WG + netstack] → localhost UDP shim → [outer WG] →
 | `--gool` | warp-in-warp mode |
 | `--masque` | use MASQUE (CONNECT-IP over HTTP/3) instead of WireGuard |
 | `--masque-h2` | force HTTP/2 for MASQUE (otherwise HTTP/3 then fallback) |
+| `--masque-endpoint <IP[:PORT]>` | override the MASQUE edge (NAT64/IPv6 address; port defaults to 443) |
 | `--masque-config <FILE>` | reuse a usque-compatible MASQUE config; implies `--masque` |
 | `--outer-config <FILE>` | custom standard WireGuard outer; WARP remains inner |
 | `--inner-config <FILE>` | custom standard WireGuard inner; WARP remains outer |

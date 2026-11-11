@@ -68,6 +68,10 @@ struct Cli {
     #[arg(long)]
     masque_h2: bool,
 
+    /// Override the MASQUE edge address (ip[:port], IPv6 in brackets); useful for NAT64 endpoints
+    #[arg(long, value_name = "IP[:PORT]")]
+    masque_endpoint: Option<String>,
+
     /// Standard WireGuard config to use as the outer tunnel; implies --gool
     #[arg(long, value_name = "FILE", conflicts_with = "inner_config")]
     outer_config: Option<PathBuf>,
@@ -148,7 +152,8 @@ async fn real_main(cli: Cli) -> Result<()> {
     }
     let has_custom_config = cli.outer_config.is_some() || cli.inner_config.is_some();
     let gool = cli.gool || has_custom_config;
-    let masque = cli.masque || cli.masque_config.is_some() || cli.masque_h2;
+    let masque =
+        cli.masque || cli.masque_config.is_some() || cli.masque_h2 || cli.masque_endpoint.is_some();
 
     // MASQUE's CONNECT-IP edge carries 1400-byte packets; WireGuard keeps the
     // warp-plus-compatible 1330 default.
@@ -175,10 +180,16 @@ async fn real_main(cli: Cli) -> Result<()> {
         }
         if !cli.endpoint.is_empty() {
             return Err(anyhow!(
-                "-e/--endpoint does not apply to --masque; the endpoint comes from the WARP API"
+                "-e/--endpoint does not apply to --masque; use --masque-endpoint"
             ));
         }
     }
+
+    let masque_endpoint = cli
+        .masque_endpoint
+        .as_deref()
+        .map(parse_endpoint_override)
+        .transpose()?;
 
     if gool && cli.v6 {
         return Err(anyhow!(
@@ -252,6 +263,7 @@ async fn real_main(cli: Cli) -> Result<()> {
         masque,
         masque_config: cli.masque_config,
         masque_h2: cli.masque_h2,
+        masque_endpoint,
         use_v4,
         use_v6,
         tcp_buf: cli.tcp_buf * 1024,
@@ -309,4 +321,45 @@ fn resolve_cache_dir(explicit: &str) -> PathBuf {
         return dirs.cache_dir().to_path_buf();
     }
     PathBuf::from("warpeer_cache")
+}
+
+/// Parse `--masque-endpoint`: `ip`, `ip:port`, `[v6]`, or `[v6]:port`.
+/// Port defaults to 443 (the MASQUE edge port).
+fn parse_endpoint_override(s: &str) -> Result<SocketAddr> {
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    let bare = s.trim_matches(['[', ']']);
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, 443));
+    }
+    Err(anyhow!(
+        "--masque-endpoint must be ip[:port] (IPv6 addresses in brackets)"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_endpoint_override;
+
+    #[test]
+    fn parses_masque_endpoint_overrides() {
+        assert_eq!(
+            parse_endpoint_override("162.159.198.2:443").unwrap(),
+            "162.159.198.2:443".parse().unwrap()
+        );
+        assert_eq!(
+            parse_endpoint_override("162.159.198.2").unwrap(),
+            "162.159.198.2:443".parse().unwrap()
+        );
+        assert_eq!(
+            parse_endpoint_override("[2602:fc59:b0:64::a29f:c602]:443").unwrap(),
+            "[2602:fc59:b0:64::a29f:c602]:443".parse().unwrap()
+        );
+        assert_eq!(
+            parse_endpoint_override("[2602:fc59:b0:64::a29f:c602]").unwrap(),
+            "[2602:fc59:b0:64::a29f:c602]:443".parse().unwrap()
+        );
+        assert!(parse_endpoint_override("consumer-masque.cloudflareclient.com").is_err());
+    }
 }
