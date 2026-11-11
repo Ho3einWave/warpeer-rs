@@ -76,6 +76,10 @@ struct Cli {
     #[arg(long, visible_alias = "masque-in-masque")]
     masque_gool: bool,
 
+    /// Inner MASQUE edge override for --masque-gool (ip[:port]); use a NAT64 address to change location
+    #[arg(long, value_name = "IP[:PORT]")]
+    masque_inner_endpoint: Option<String>,
+
     /// Inner MASQUE config for --masque-gool (the outer uses --masque-config)
     #[arg(long, value_name = "FILE")]
     masque_inner_config: Option<PathBuf>,
@@ -160,7 +164,8 @@ async fn real_main(cli: Cli) -> Result<()> {
     }
     let has_custom_config = cli.outer_config.is_some() || cli.inner_config.is_some();
     let gool = cli.gool || has_custom_config;
-    let masque_gool = cli.masque_gool || cli.masque_inner_config.is_some();
+    let masque_gool =
+        cli.masque_gool || cli.masque_inner_config.is_some() || cli.masque_inner_endpoint.is_some();
     let masque = cli.masque
         || cli.masque_config.is_some()
         || cli.masque_h2
@@ -199,6 +204,11 @@ async fn real_main(cli: Cli) -> Result<()> {
 
     let masque_endpoint = cli
         .masque_endpoint
+        .as_deref()
+        .map(parse_endpoint_override)
+        .transpose()?;
+    let masque_inner_endpoint = cli
+        .masque_inner_endpoint
         .as_deref()
         .map(parse_endpoint_override)
         .transpose()?;
@@ -286,6 +296,7 @@ async fn real_main(cli: Cli) -> Result<()> {
         masque_inner_config: cli.masque_inner_config,
         masque_h2: cli.masque_h2,
         masque_endpoint,
+        masque_inner_endpoint,
         use_v4,
         use_v6,
         tcp_buf: cli.tcp_buf * 1024,
@@ -394,9 +405,12 @@ mod tests {
             "--masque-gool",
             "--masque-inner-config",
             "/tmp/inner.json",
+            "--masque-inner-endpoint",
+            "[2602:fc59:b0:64::a29f:c602]:443",
         ])
         .unwrap();
         assert!(cli.masque_gool);
         assert!(cli.masque_inner_config.is_some());
+        assert!(cli.masque_inner_endpoint.is_some());
     }
 }

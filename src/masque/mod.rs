@@ -67,7 +67,7 @@ async fn run_single(opts: &Options) -> Result<()> {
     )
     .await?;
     let addresses = interface_addresses(&config)?;
-    let client = MasqueClient::new(&config, opts, true)?;
+    let client = MasqueClient::new(&config, opts, opts.masque_endpoint)?;
 
     info!(
         endpoint_v4 = %client.endpoint_h3,
@@ -119,8 +119,8 @@ async fn run_gool(opts: &Options) -> Result<()> {
 
     let outer_addresses = interface_addresses(&outer_config)?;
     let inner_addresses = interface_addresses(&inner_config)?;
-    let outer = MasqueClient::new(&outer_config, opts, true)?;
-    let inner = MasqueClient::new(&inner_config, opts, false)?;
+    let outer = MasqueClient::new(&outer_config, opts, opts.masque_endpoint)?;
+    let inner = MasqueClient::new(&inner_config, opts, opts.masque_inner_endpoint)?;
 
     info!(
         outer_h3 = %outer.endpoint_h3,
@@ -342,7 +342,7 @@ struct MasqueClient {
 }
 
 impl MasqueClient {
-    fn new(config: &Config, opts: &Options, use_endpoint_override: bool) -> Result<Self> {
+    fn new(config: &Config, opts: &Options, endpoint_override: Option<SocketAddr>) -> Result<Self> {
         let signing_key = usque_crypto::decode_private_key(&config.private_key)
             .context("parsing the MASQUE private key")?;
         let peer = usque_crypto::decode_endpoint_public_key(&config.endpoint_pub_key)
@@ -362,19 +362,12 @@ impl MasqueClient {
             .context("building the MASQUE TLS config")
         };
 
-        // The CLI override applies to the outer/single tunnel, not to the inner
-        // device of a MASQUE-in-MASQUE chain.
-        let override_addr = if use_endpoint_override {
-            opts.masque_endpoint
-        } else {
-            None
-        };
-        let endpoint_h3 = match override_addr {
+        let endpoint_h3 = match endpoint_override {
             Some(addr) => addr,
             None => select_endpoint(config, opts.use_v4, opts.use_v6, false)?,
         };
         // HTTP/2 can fall back to the HTTP/3 edge if the config lacks an h2 one.
-        let endpoint_h2 = match override_addr {
+        let endpoint_h2 = match endpoint_override {
             Some(addr) => addr,
             None => select_endpoint(config, opts.use_v4, opts.use_v6, true).unwrap_or(endpoint_h3),
         };

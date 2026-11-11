@@ -58,6 +58,8 @@ pub struct Options {
     pub masque_h2: bool,
     /// Explicit MASQUE edge address override (e.g. a NAT64 IPv6 endpoint).
     pub masque_endpoint: Option<SocketAddr>,
+    /// Inner MASQUE edge override for --masque-gool (e.g. NAT64).
+    pub masque_inner_endpoint: Option<SocketAddr>,
     /// Endpoint address families allowed for MASQUE endpoint selection.
     pub use_v4: bool,
     pub use_v6: bool,

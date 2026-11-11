@@ -156,10 +156,11 @@ warpeer --masque --masque-endpoint '[2602:fc59:b0:64::a29f:c602]:443'
 warpeer -e '[2602:fc59:b0:64::a29f:c702]:2408'
 ```
 
-This is the "Soul Transfer" technique (not a nested tunnel). It requires IPv6
-connectivity, and public NAT64 gateways have usage limits and extra latency;
-choose a prefix appropriate for the location you want and expect variable
-stability.
+This is the "Soul Transfer" technique (not a nested tunnel). For a single tunnel
+it requires IPv6 on the host; on IPv4-only networks use the MASQUE-in-MASQUE
+variant below, where the outer WARP tunnel supplies IPv6. Public NAT64 gateways
+have usage limits and extra latency; choose a prefix appropriate for the location
+you want and expect variable availability.
 
 #### MASQUE-in-MASQUE
 
@@ -178,13 +179,33 @@ The two devices are auto-registered and stored as `masque-gool-outer.json` and
 supplied with `--masque-config` (outer) and `--masque-inner-config` (inner);
 they must be different WARP devices.
 
-Measured on the test line: 60/60 requests over two minutes, roughly 2.8–4.1 MB/s
-(vs ~4 MB/s for a single MASQUE H2 tunnel and ~12 MB/s for WireGuard). The double
-encapsulation costs latency and throughput; it is a chaining/location tool, not a
-speed upgrade. In that test the WARP exit location stayed the same (`loc=IR`,
-`colo=FRA`) for WireGuard, single MASQUE and MASQUE-in-MASQUE — nesting alone
-does not change the exit; use the NAT64 `--masque-endpoint` above if that is the
-goal.
+**Changing the location through the chain.** Plain nesting keeps the outer
+exit (`loc=IR`, `colo=FRA` on the test line for WireGuard, single MASQUE and
+MASQUE-in-MASQUE). To change the country, point the **inner** endpoint at a
+NAT64-synthesized IPv6 address. The outer MASQUE tunnel supplies IPv6 even on an
+IPv4-only host, so this works without IPv6 on the local network:
+
+```sh
+# US (Chicago) NAT64 prefix, inner MASQUE edge 162.159.198.2 -> a29f:c602
+warpeer --masque-gool --masque-h2 \
+  --masque-inner-endpoint '[2602:fc59:11:64::a29f:c602]:443'
+```
+
+Measured on the test line:
+
+| Path | IP | Colo | Location |
+|---|---|---|---|
+| WireGuard | 104.28.214.164 | FRA | **IR** |
+| single MASQUE | 104.28.246.167 | FRA | **IR** |
+| MASQUE-in-MASQUE + US NAT64 | 104.28.235.119 | **ORD** | **US** |
+
+Throughput through that public NAT64 gateway was ~0.2–1.2 MB/s and varies; use
+this path for location, not for speed. The US Fremont prefix
+(`2602:fc59:b0:64::a29f:c602`) also worked once (SJC/US) but was flaky; the
+Netherlands, Germany and Finland prefixes failed at test time. Public gateways
+are shared and availability changes. Other known prefixes include
+`2a02:898:146:64::a29f:c602` (NL), `2001:67c:2960:6464::a29f:c602` (DE) and
+`2001:67c:2b0:db32:0:1:a29f:c602` (FI). Use them responsibly.
 
 MASQUE (including `--masque-gool`) currently cannot be combined with `--gool`,
 `--tun`, `--scan` or `-e`.
@@ -307,6 +328,7 @@ SOCKS client → [inner WG + netstack] → localhost UDP shim → [outer WG] →
 | `--masque-h2` | force HTTP/2 for MASQUE (otherwise HTTP/3 then fallback) |
 | `--masque-endpoint <IP[:PORT]>` | override the MASQUE edge (NAT64/IPv6 address; port defaults to 443) |
 | `--masque-gool` | MASQUE-in-MASQUE: carry an inner MASQUE tunnel through an outer one (alias `--masque-in-masque`) |
+| `--masque-inner-endpoint <IP[:PORT]>` | inner MASQUE edge override for `--masque-gool` (NAT64 for location change) |
 | `--masque-inner-config <FILE>` | inner MASQUE config for `--masque-gool`; implies it |
 | `--masque-config <FILE>` | reuse a usque-compatible MASQUE config; outer config in `--masque-gool` |
 | `--outer-config <FILE>` | custom standard WireGuard outer; WARP remains inner |
