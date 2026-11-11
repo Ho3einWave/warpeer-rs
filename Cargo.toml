@@ -2,7 +2,7 @@
 name = "warpeer"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.95"
 description = "Userspace Cloudflare WARP client (warp + warp-in-warp) with AmneziaWG-style junk-packet obfuscation"
 
 [[bin]]
@@ -25,6 +25,9 @@ smoltcp = { version = "0.12", default-features = false, features = ["std", "medi
 
 # HTTP client for the WARP registration API (standard TLS via rustls for now)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Client-config type shared with the MASQUE transport (usque-crypto builds it)
+rustls = { version = "0.23", default-features = false }
 
 # serialization
 serde = { version = "1", features = ["derive"] }
@@ -54,3 +57,16 @@ anyhow = "1"
 # cache dir resolution
 directories = "5"
 tun = { version = "0.8.11", features = ["async"] }
+
+# MASQUE (CONNECT-IP over HTTP/3), used by --masque. The transport is a vendored
+# copy of the MIT-licensed usque-masque crate with HTTP/2 flow-control fixes
+# (vendor/usque-masque). Cloudflare's CONNECT-IP token is the non-standard
+# `cf-connect-ip`, which upstream `h3` rejects, so a patched h3 is vendored under
+# vendor/h3 (see [patch.crates-io] below).
+usque-masque = { path = "vendor/usque-masque" }
+usque-crypto = { git = "https://github.com/FireMasterK/usque-rs", rev = "813e4d8beef0e9ad309cc1d608384963aa18626a", package = "usque-crypto" }
+usque-cloudflare-api = { git = "https://github.com/FireMasterK/usque-rs", rev = "813e4d8beef0e9ad309cc1d608384963aa18626a", package = "usque-cloudflare-api" }
+usque-config = { git = "https://github.com/FireMasterK/usque-rs", rev = "813e4d8beef0e9ad309cc1d608384963aa18626a", package = "usque-config" }
+
+[patch.crates-io]
+h3 = { path = "vendor/h3" }

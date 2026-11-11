@@ -1,0 +1,33 @@
+[package]
+name = "usque-masque"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "MASQUE CONNECT-IP transport (vendored from FireMasterK/usque-rs, HTTP/2 flow-control fixes)"
+
+[features]
+default = ["quinn"]
+quinn = ["dep:quinn", "dep:h3", "dep:h3-datagram", "dep:h3-quinn"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+crossfire = "3.1"
+etherparse = "0.21"
+futures-util = "0.3"
+h2 = "0.4"
+h3 = { version = "0.0.8", features = ["tracing"], optional = true }
+h3-datagram = { version = "0.0.2", optional = true }
+h3-quinn = { version = "0.0.10", features = ["datagram"], optional = true }
+http = "1"
+libc = "0.2"
+parking_lot = "0.13"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs", "log"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "logging", "tls12"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
+tracing = "0.1"
+usque-crypto = { git = "https://github.com/FireMasterK/usque-rs", rev = "813e4d8beef0e9ad309cc1d608384963aa18626a", package = "usque-crypto" }

@@ -12,6 +12,8 @@ DNS, the proxy and the obfuscation all live in the process.
 Features:
 
 - **Normal WARP** — a single WireGuard tunnel to a Cloudflare WARP endpoint.
+- **MASQUE** — Cloudflare's newer CONNECT-IP over HTTP/3 transport (with
+  automatic HTTP/2 fallback when UDP/443 is filtered).
 - **warp-in-warp (gool)** — a second WARP tunnel nested inside the first.
 - **Custom outer WireGuard** — run WARP inside a standard WireGuard tunnel.
 - **Custom inner WireGuard** — run a standard WireGuard tunnel inside WARP.
@@ -26,7 +28,7 @@ Features:
 
 ## Requirements
 
-- Rust 1.80 or newer to build.
+- Rust 1.95 or newer to build.
 - Linux or Windows. TUN mode is Windows-only (Wintun); the proxy and gool modes work
   on Linux.
 - TUN mode needs **Administrator** rights and **`wintun.dll`** from
@@ -71,6 +73,15 @@ warpeer --inner-config inner.conf --scan -4
 
 # WARP+ license
 warpeer -k <LICENSE_KEY>
+
+# MASQUE (CONNECT-IP over HTTP/3, automatic HTTP/2 fallback)
+warpeer --masque
+
+# Force HTTP/2 for MASQUE (UDP/443 filtered networks)
+warpeer --masque --masque-h2
+
+# Reuse an existing usque-compatible MASQUE config
+warpeer --masque --masque-config /path/to/config.json
 ```
 
 The proxy speaks three protocols on the same port, detected from the first byte:
@@ -97,6 +108,40 @@ It auto-configures routing and restores it on exit (Ctrl-C): it pins a host rout
 WARP endpoint via your real gateway (so the encrypted traffic doesn't loop), adds
 split-default routes (`0.0.0.0/1` + `128.0.0.0/1`, and `::/1` + `8000::/1`) via the TUN
 adapter, and points DNS at the tunnel resolver. In TUN mode there is no proxy.
+
+### MASQUE mode (CONNECT-IP over HTTP/3)
+
+`--masque` uses Cloudflare's MASQUE transport instead of WireGuard. On first run
+it registers a separate WARP device with an ECDSA P-256 key, enrolls the key,
+and stores a usque-compatible config at `<cache-dir>/masque.json` (mode 0600).
+That device is distinct from the WireGuard identity and gets its own assigned
+addresses and WARP account.
+
+The client performs mutual TLS against
+`consumer-masque.cloudflareclient.com` (pinned to the endpoint key returned by
+the API) and opens an RFC 9484 `CONNECT-IP` request. IP packets travel as HTTP/3
+datagrams. When UDP/443 is filtered — common on some networks — it falls back to
+HTTP/2 (`cf-connect-ip` capsules over TLS/TCP); `--masque-h2` skips the HTTP/3
+attempt:
+
+```sh
+# automatic: HTTP/3 first, HTTP/2 fallback
+warpeer --masque
+
+# force HTTP/2 (skips the HTTP/3 timeout)
+warpeer --masque --masque-h2
+
+# reuse a device registered by usque/usque-rs
+warpeer --masque --masque-config /path/to/config.json
+```
+
+`--masque-config` accepts the `config.json` format used by usque and usque-rs,
+so an existing device can be reused without registering a new one. MASQUE
+defaults to a 1400-byte tunnel MTU; `--mtu` overrides it.
+
+MASQUE currently cannot be combined with `--gool`, `--tun`, `--scan` or `-e`.
+HTTP/2 fallback is reliable but slower than HTTP/3 (and slower than WireGuard
+on a healthy path).
 
 ### Obfuscation
 
@@ -139,6 +184,11 @@ Handshake RTT is a poor predictor of throughput — an endpoint that answers a
 handshake in 90 ms can still deliver under 2 MB/s under load. Validate candidates
 with a real transfer before pinning one in your service config.
 
+MASQUE over HTTP/2 measured ~4.6–5.5 MB/s with `--mtu 1400` on a network where
+UDP/443 was filtered, while WireGuard with the 2 MiB buffer reached ~12–13 MB/s
+on the same 120 Mbps line. HTTP/3 (where UDP works) is the faster MASQUE path;
+the HTTP/2 fallback is for networks that cannot use it.
+
 ## Architecture
 
 | Concern | Crate / module |
@@ -146,6 +196,7 @@ with a real transfer before pinning one in your service config.
 | WireGuard protocol (Noise) | [`boringtun`] wrapped in `wg::engine` |
 | Userspace TCP/IP + DNS | [`smoltcp`] in `netstack` |
 | WARP account API | `warp::api` (reqwest + rustls) |
+| MASQUE transport | `masque` + vendored `usque-masque` (quinn, h3, h2) |
 | Obfuscation | `obfs` |
 | Mixed proxy | `proxy` |
 
@@ -156,6 +207,12 @@ SOCKS/HTTP client
       │
       ▼
   proxy ──► NetStack (smoltcp, dedicated poll task) ◄──► wg::engine ──UDP──► WARP edge
+```
+
+MASQUE mode replaces the WireGuard engine with the CONNECT-IP transport:
+
+```
+proxy ──► NetStack ──► CONNECT-IP (H3 datagrams / H2 capsules) ──TLS──► Cloudflare MASQUE edge
 ```
 
 The engine owns the UDP socket, so it adds the two WARP-specific behaviours on top
@@ -198,13 +255,16 @@ SOCKS client → [inner WG + netstack] → localhost UDP shim → [outer WG] →
 | `-k, --key` | WARP+ license key |
 | `--dns` | resolver used inside the tunnel (default `1.1.1.1`) |
 | `--gool` | warp-in-warp mode |
+| `--masque` | use MASQUE (CONNECT-IP over HTTP/3) instead of WireGuard |
+| `--masque-h2` | force HTTP/2 for MASQUE (otherwise HTTP/3 then fallback) |
+| `--masque-config <FILE>` | reuse a usque-compatible MASQUE config; implies `--masque` |
 | `--outer-config <FILE>` | custom standard WireGuard outer; WARP remains inner |
 | `--inner-config <FILE>` | custom standard WireGuard inner; WARP remains outer |
 | `--tun` | full-system TUN mode (Windows; Administrator + `wintun.dll`) |
 | `--scan` / `--rtt <ms>` | scan for endpoints / max acceptable RTT |
 | `-4` / `-6` | restrict endpoint address family |
 | `--tcp-buf <KiB>` | per-direction TCP buffer per connection (default 2048; window for high-RTT links) |
-| `--mtu <bytes>` | tunnel MTU for the userspace netstack (default 1330) |
+| `--mtu <bytes>` | tunnel MTU (default 1330 WireGuard, 1400 MASQUE) |
 | `--cache-dir <DIR>` | directory for the WARP identity (default: OS cache dir) |
 | `--jc/--jmin/--jmax/--jdelay` | AmneziaWG junk knobs |
 | `--no-obfs` | disable junk obfuscation |
@@ -219,6 +279,7 @@ src/
   app.rs         identity -> tunnel + netstack wiring, MTU/buffer tuning
   gool.rs        warp-in-warp shim and nested tunnels
   tunmode.rs     Windows Wintun mode, routing setup/teardown
+  masque/        MASQUE mode: registration, TLS/mTLS, CONNECT-IP pump
   obfs.rs        warp-plus trick + AmneziaWG junk bursts
   wgconfig.rs    minimal wg-quick config parser
   wg/            boringtun engine (reserved bytes, junk, timers)
@@ -237,14 +298,26 @@ src/
 - The plain-HTTP proxy path rebuilds the first request only; subsequent keep-alive
   requests are forwarded verbatim.
 - TUN mode is Windows-only; `--tun` on other platforms fails at startup.
+- MASQUE registers a separate WARP device/account on first use; the config contains
+  its private key (written `0600`). A `-k` license is applied best-effort.
+- MASQUE currently supports the proxy path only (no gool, TUN or endpoint scanning).
+- HTTP/3 needs UDP/443; when that is filtered the client falls back to HTTP/2, which
+  is reliable but slower.
 
 ## Acknowledgements
 
 - [warp-plus](https://github.com/bepass-org/warp-plus) — the WARP/gool behaviour and
   obfuscation this project ports.
+- [usque](https://github.com/Diniboy1123/usque) and
+  [usque-rs](https://github.com/FireMasterK/usque-rs) — the open-source Cloudflare
+  MASQUE implementations this mode is based on. `vendor/usque-masque` is a modified
+  MIT-licensed copy of the latter (HTTP/2 flow-control fixes); see
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - [boringtun](https://github.com/cloudflare/boringtun) — Cloudflare's Rust WireGuard
   implementation.
 - [smoltcp](https://github.com/smoltcp-rs/smoltcp) — the userspace TCP/IP stack.
+- A patched [h3](https://github.com/hyperium/h3) lives in `vendor/h3` to accept
+  Cloudflare's non-standard `cf-connect-ip` protocol token.
 
 [`boringtun`]: https://crates.io/crates/boringtun
 [`smoltcp`]: https://crates.io/crates/smoltcp

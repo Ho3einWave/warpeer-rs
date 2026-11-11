@@ -46,6 +46,15 @@ pub struct Options {
     pub inner_config: Option<PathBuf>,
     /// TUN mode: route all system traffic through WARP (Windows, needs Admin).
     pub tun: bool,
+    /// MASQUE mode (CONNECT-IP over HTTP/3) instead of WireGuard.
+    pub masque: bool,
+    /// Existing usque-compatible MASQUE config file.
+    pub masque_config: Option<PathBuf>,
+    /// Force HTTP/2 for MASQUE (otherwise HTTP/3 then fallback).
+    pub masque_h2: bool,
+    /// Endpoint address families allowed for MASQUE endpoint selection.
+    pub use_v4: bool,
+    pub use_v6: bool,
     /// Per-direction TCP socket buffer for tunnel connections (bytes).
     pub tcp_buf: usize,
     /// MTU for the WARP netstack's tunnel interface.
@@ -75,6 +84,10 @@ pub(crate) struct Tuning {
 }
 
 pub async fn run(mut opts: Options) -> Result<()> {
+    if opts.masque {
+        return crate::masque::run(&opts).await;
+    }
+
     if opts.outer_config.is_some() || opts.inner_config.is_some() {
         opts.gool = true;
     }
@@ -237,7 +250,7 @@ pub(crate) async fn setup_tunnel(
 }
 
 /// Probe the data path by doing a tiny HTTP exchange to 1.1.1.1 through the tunnel.
-async fn connectivity_ok(netstack: &NetStack) -> bool {
+pub(crate) async fn connectivity_ok(netstack: &NetStack) -> bool {
     let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 80);
     let fut = async {
         let mut tcp = netstack.connect(target).await.ok()?;

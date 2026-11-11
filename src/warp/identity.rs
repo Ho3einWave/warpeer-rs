@@ -133,7 +133,7 @@ pub fn save(dir: &Path, ident: &Identity) -> Result<()> {
 
 /// Write the identity file with owner-only permissions: it holds the device's
 /// WireGuard private key.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
 
     let mut opts = std::fs::OpenOptions::new();

@@ -1,5 +1,6 @@
 mod app;
 mod gool;
+mod masque;
 mod netstack;
 mod obfs;
 mod proxy;
@@ -55,6 +56,18 @@ struct Cli {
     #[arg(long)]
     gool: bool,
 
+    /// Use MASQUE (CONNECT-IP over HTTP/3) instead of WireGuard
+    #[arg(long)]
+    masque: bool,
+
+    /// Existing usque-compatible MASQUE config file; implies --masque
+    #[arg(long, value_name = "FILE")]
+    masque_config: Option<PathBuf>,
+
+    /// Force HTTP/2 for MASQUE (default: HTTP/3, falling back to HTTP/2)
+    #[arg(long)]
+    masque_h2: bool,
+
     /// Standard WireGuard config to use as the outer tunnel; implies --gool
     #[arg(long, value_name = "FILE", conflicts_with = "inner_config")]
     outer_config: Option<PathBuf>,
@@ -75,9 +88,9 @@ struct Cli {
     #[arg(long, default_value_t = 1000)]
     rtt: u64,
 
-    /// Tunnel MTU for the userspace netstack (bytes)
-    #[arg(long, default_value_t = app::SINGLE_MTU)]
-    mtu: usize,
+    /// Tunnel MTU for the userspace netstack (default: 1330 WireGuard, 1400 MASQUE)
+    #[arg(long)]
+    mtu: Option<usize>,
 
     /// Per-direction TCP buffer per connection, in KiB (uses 2x this much RAM per connection)
     #[arg(long, default_value_t = netstack::DEFAULT_TCP_BUF / 1024)]
@@ -130,14 +143,43 @@ async fn real_main(cli: Cli) -> Result<()> {
     if cli.v4 && cli.v6 {
         return Err(anyhow!("can't force both -4 and -6"));
     }
-    if !(1280..=1440).contains(&cli.mtu) {
-        return Err(anyhow!("--mtu must be between 1280 and 1440 bytes"));
-    }
     if cli.tcp_buf < 64 {
         return Err(anyhow!("--tcp-buf must be at least 64 KiB"));
     }
     let has_custom_config = cli.outer_config.is_some() || cli.inner_config.is_some();
     let gool = cli.gool || has_custom_config;
+    let masque = cli.masque || cli.masque_config.is_some() || cli.masque_h2;
+
+    // MASQUE's CONNECT-IP edge carries 1400-byte packets; WireGuard keeps the
+    // warp-plus-compatible 1330 default.
+    let mtu = cli
+        .mtu
+        .unwrap_or(if masque { 1400 } else { app::SINGLE_MTU });
+    if !(1280..=1440).contains(&mtu) {
+        return Err(anyhow!("--mtu must be between 1280 and 1440 bytes"));
+    }
+
+    if masque {
+        if gool {
+            return Err(anyhow!(
+                "--masque cannot be combined with --gool/--outer-config/--inner-config yet"
+            ));
+        }
+        if cli.tun {
+            return Err(anyhow!("--masque cannot be combined with --tun yet"));
+        }
+        if cli.scan {
+            return Err(anyhow!(
+                "--scan does not apply to --masque; the endpoint comes from the WARP API"
+            ));
+        }
+        if !cli.endpoint.is_empty() {
+            return Err(anyhow!(
+                "-e/--endpoint does not apply to --masque; the endpoint comes from the WARP API"
+            ));
+        }
+    }
+
     if gool && cli.v6 {
         return Err(anyhow!(
             "warp-in-warp (--gool/--outer-config/--inner-config) currently requires an IPv4 WARP endpoint"
@@ -156,12 +198,17 @@ async fn real_main(cli: Cli) -> Result<()> {
     let bind: SocketAddr = cli.bind.parse().context("invalid bind address")?;
     let dns: IpAddr = cli.dns.parse().context("invalid DNS address")?;
 
-    let endpoint: SocketAddr = if cli.endpoint.is_empty() {
-        warp::endpoint::random_warp_endpoint(use_v4, use_v6)?
+    // MASQUE takes its endpoint from the config; WireGuard picks one here.
+    let endpoint: Option<SocketAddr> = if masque {
+        None
+    } else if cli.endpoint.is_empty() {
+        Some(warp::endpoint::random_warp_endpoint(use_v4, use_v6)?)
     } else {
-        cli.endpoint
-            .parse()
-            .context("invalid endpoint (expected ip:port)")?
+        Some(
+            cli.endpoint
+                .parse()
+                .context("invalid endpoint (expected ip:port)")?,
+        )
     };
 
     let reserved = if cli.reserved.is_empty() {
@@ -189,7 +236,7 @@ async fn real_main(cli: Cli) -> Result<()> {
         None
     };
 
-    info!(%endpoint, %bind, gool, scan = cli.scan, "starting warpeer");
+    info!(endpoint = ?endpoint, %bind, gool, masque, scan = cli.scan, "starting warpeer");
 
     let opts = app::Options {
         bind,
@@ -202,9 +249,14 @@ async fn real_main(cli: Cli) -> Result<()> {
         outer_config: cli.outer_config,
         inner_config: cli.inner_config,
         tun: cli.tun,
+        masque,
+        masque_config: cli.masque_config,
+        masque_h2: cli.masque_h2,
+        use_v4,
+        use_v6,
         tcp_buf: cli.tcp_buf * 1024,
-        mtu: cli.mtu,
-        endpoints: vec![endpoint],
+        mtu,
+        endpoints: endpoint.into_iter().collect(),
         scan,
     };
 
