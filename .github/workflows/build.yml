@@ -1,0 +1,111 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake perl
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  build-linux:
+    name: Linux x86_64
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake perl
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist staging
+          cp target/release/warpeer staging/
+          cp README.md THIRD_PARTY_NOTICES.md staging/
+          tar -czf dist/warpeer-linux-x86_64.tar.gz -C staging .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: warpeer-linux-x86_64
+          path: dist/warpeer-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows x86_64
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist, staging | Out-Null
+          Copy-Item target/release/warpeer.exe staging/
+          Copy-Item -Path README.md, THIRD_PARTY_NOTICES.md -Destination staging/
+          Compress-Archive -Path staging/* -DestinationPath dist/warpeer-windows-x86_64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: warpeer-windows-x86_64
+          path: dist/warpeer-windows-x86_64.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: warpeer-*
+          path: dist
+          merge-multiple: true
+      - name: List assets
+        run: ls -lh dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: warpeer ${{ github.ref_name }}
+          body: |
+            Userspace Cloudflare WARP client — WireGuard + MASQUE.
+
+            Highlights:
+            - WireGuard with a 2 MiB TCP window, MTU 1330 and asynchronous keepalive junk
+            - MASQUE CONNECT-IP over HTTP/3 with automatic HTTP/2 fallback
+            - MASQUE-in-MASQUE and NAT64 location change (`--masque-gool`, `--masque-inner-endpoint`)
+            - Mixed SOCKS5/SOCKS4/HTTP proxy, gool, Windows TUN, endpoint scanner
+            - Linux: `warpeer-linux-x86_64.tar.gz`
+            - Windows: `warpeer-windows-x86_64.zip` — put `wintun.dll` from <https://www.wintun.net> next to `warpeer.exe` for TUN mode
+          files: dist/*
+          fail_on_unmatched_files: true

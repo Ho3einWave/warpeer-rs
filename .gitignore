@@ -1,5 +1,7 @@
 /target
 /target-linux
+/dist
+/staging
 *.log
 /testcache
 

@@ -1,5 +1,8 @@
 # warpeer
 
+[![Build and Release](https://github.com/Ho3einWave/warpeer-rs/actions/workflows/build.yml/badge.svg)](https://github.com/Ho3einWave/warpeer-rs/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/Ho3einWave/warpeer-rs?display_name=tag)](https://github.com/Ho3einWave/warpeer-rs/releases)
+
 A userspace Cloudflare WARP client written in Rust — a port of the WARP parts of
 [warp-plus](https://github.com/bepass-org/warp-plus) (**without** the Psiphon/cfon
 feature). It speaks WireGuard entirely in user space and exposes the tunnel as a
@@ -38,9 +41,18 @@ Features:
 ## Building
 
 ```sh
-cargo build --release
+cargo build --release --locked
 # binary: target/release/warpeer (target/release/warpeer.exe on Windows)
 ```
+
+Prebuilt binaries are attached to [releases](https://github.com/Ho3einWave/warpeer-rs/releases):
+`warpeer-linux-x86_64.tar.gz` and `warpeer-windows-x86_64.zip`. The Windows
+archive does not bundle `wintun.dll`; download it from <https://www.wintun.net>
+and place it next to `warpeer.exe` for TUN mode.
+
+`.github/workflows/build.yml` runs formatting, clippy and tests on every
+push/PR, builds the Linux and Windows release assets, and publishes them when a
+`v*` tag is pushed.
 
 On Windows, `build.ps1` wraps the native Windows build and a Linux build through
 WSL (into a separate `target-linux/` directory):
