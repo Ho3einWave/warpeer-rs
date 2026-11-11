@@ -261,6 +261,28 @@ Handshake RTT is a poor predictor of throughput — an endpoint that answers a
 handshake in 90 ms can still deliver under 2 MB/s under load. Validate candidates
 with a real transfer before pinning one in your service config.
 
+### WireGuard: endpoint choice dominates
+
+With the 2 MiB TCP window, MTU 1330 and asynchronous keepalive junk already in
+place, the remaining variable is the WARP endpoint:
+
+- MTU 1330 measured clearly best on the test line (9.4–9.7 MB/s); 1280, 1380,
+  1400 and 1420 were lower or unstable (2–7 MB/s).
+- Raising the kernel UDP buffers (`net.core.*mem_*`) did not help; the defaults
+  were fine.
+- **Endpoint performance is per-identity and changes within minutes.** With the
+  same service identity, one endpoint gave 8.4–9.5 MB/s in one test and
+  4.5–7.5 MB/s minutes later; another gave 10.5 MB/s then 3.8–5.2 MB/s. The
+  current endpoint was ~2–2.5× faster than the previously pinned one at the time
+  of the test.
+- Measure candidates with the identity the client will actually use: run the
+  proxy for each endpoint, download ~20 MB twice, and pin the winner in the
+  service. Re-test periodically — handshake RTT does not predict this, and the
+  scanner project is adding a throughput ranking for exactly this.
+
+Direct line on the same box measured 11–14 MB/s; the best WireGuard flow was
+10.5 MB/s and drifted with the endpoint.
+
 MASQUE over HTTP/2 measured ~4.6–5.5 MB/s with `--mtu 1400` on a network where
 UDP/443 was filtered, while WireGuard with the 2 MiB buffer reached ~12–13 MB/s
 on the same 120 Mbps line. HTTP/3 (where UDP works) is the faster MASQUE path;
